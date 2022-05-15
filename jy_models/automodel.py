@@ -13,6 +13,8 @@ from .layer import (
     PoolerEndLogits,
     PoolerStartLogits,
     SelfAttentiveSpanExtractor,
+    MaxPoolingSpanExtractor,
+    BidirectionalEndpointSpanExtractor,
     globalpointer_loss,
     multilabel_categorical_crossentropy, )
 

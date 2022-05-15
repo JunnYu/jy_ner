@@ -9,7 +9,9 @@ from overrides import overrides
 # !!!!!!!!!!!!!!!!!ALL copied from allennlp!!!!!!!!!!!!!!!!!
 # from allennlp.modules.span_extractors import SelfAttentiveSpanExtractor
 __all__ = [
-    "SelfAttentiveSpanExtractor", "EndpointSpanExtractor", "SpanExtractor"
+    "SelfAttentiveSpanExtractor", "EndpointSpanExtractor",
+    "MaxPoolingSpanExtractor", "BidirectionalEndpointSpanExtractor",
+    "SpanExtractorWithSpanWidthEmbedding", "SpanExtractor"
 ]
 
 
@@ -72,6 +74,129 @@ class SpanExtractor(nn.Module):
     def get_output_dim(self) -> int:
         """
         Returns the expected final dimension of the returned span representation.
+        """
+        raise NotImplementedError
+
+
+class SpanExtractorWithSpanWidthEmbedding(SpanExtractor):
+    """
+    `SpanExtractorWithSpanWidthEmbedding` implements some common code for span
+    extractors which will need to embed span width.
+    Specifically, we initiate the span width embedding matrix and other
+    attributes in `__init__`, leave an `_embed_spans` method that can be
+    implemented to compute span embeddings in different ways, and in `forward`
+    we concatenate span embeddings returned by `_embed_spans` with span width
+    embeddings to form the final span representations.
+    We keep SpanExtractor as a purely abstract base class, just in case someone
+    wants to build a totally different span extractor.
+    # Parameters
+    input_dim : `int`, required.
+        The final dimension of the `sequence_tensor`.
+    num_width_embeddings : `int`, optional (default = `None`).
+        Specifies the number of buckets to use when representing
+        span width features.
+    span_width_embedding_dim : `int`, optional (default = `None`).
+        The embedding size for the span_width features.
+    bucket_widths : `bool`, optional (default = `False`).
+        Whether to bucket the span widths into log-space buckets. If `False`,
+        the raw span widths are used.
+    # Returns
+    span_embeddings : `torch.FloatTensor`.
+        A tensor of shape `(batch_size, num_spans, embedded_span_size)`,
+        where `embedded_span_size` depends on the way spans are represented.
+    """
+
+    def __init__(
+            self,
+            input_dim: int,
+            num_width_embeddings: int=None,
+            span_width_embedding_dim: int=None,
+            bucket_widths: bool=False, ) -> None:
+        super().__init__()
+        self._input_dim = input_dim
+        self._num_width_embeddings = num_width_embeddings
+        self._bucket_widths = bucket_widths
+
+        self._span_width_embedding: Optional[nn.Embedding] = None
+        if num_width_embeddings is not None and span_width_embedding_dim is not None:
+            self._span_width_embedding = nn.Embedding(
+                num_embeddings=num_width_embeddings,
+                embedding_dim=span_width_embedding_dim)
+        elif num_width_embeddings is not None or span_width_embedding_dim is not None:
+            raise ConfigurationError(
+                "To use a span width embedding representation, you must"
+                "specify both num_width_embeddings and span_width_embedding_dim."
+            )
+
+    def forward(
+            self,
+            sequence_tensor: torch.FloatTensor,
+            span_indices: torch.LongTensor,
+            sequence_mask: torch.BoolTensor=None,
+            span_indices_mask: torch.BoolTensor=None, ):
+        """
+        Given a sequence tensor, extract spans, concatenate width embeddings
+        when need and return representations of them.
+        # Parameters
+        sequence_tensor : `torch.FloatTensor`, required.
+            A tensor of shape (batch_size, sequence_length, embedding_size)
+            representing an embedded sequence of words.
+        span_indices : `torch.LongTensor`, required.
+            A tensor of shape `(batch_size, num_spans, 2)`, where the last
+            dimension represents the inclusive start and end indices of the
+            span to be extracted from the `sequence_tensor`.
+        sequence_mask : `torch.BoolTensor`, optional (default = `None`).
+            A tensor of shape (batch_size, sequence_length) representing padded
+            elements of the sequence.
+        span_indices_mask : `torch.BoolTensor`, optional (default = `None`).
+            A tensor of shape (batch_size, num_spans) representing the valid
+            spans in the `indices` tensor. This mask is optional because
+            sometimes it's easier to worry about masking after calling this
+            function, rather than passing a mask directly.
+        # Returns
+        A tensor of shape `(batch_size, num_spans, embedded_span_size)`,
+        where `embedded_span_size` depends on the way spans are represented.
+        """
+        # shape (batch_size, num_spans, embedding_dim)
+        span_embeddings = self._embed_spans(sequence_tensor, span_indices,
+                                            sequence_mask, span_indices_mask)
+        if self._span_width_embedding is not None:
+            # width = end_index - start_index + 1 since `SpanField` use inclusive indices.
+            # But here we do not add 1 beacuse we often initiate the span width
+            # embedding matrix with `num_width_embeddings = max_span_width`
+            # shape (batch_size, num_spans)
+            widths_minus_one = span_indices[..., 1] - span_indices[..., 0]
+
+            if self._bucket_widths:
+                widths_minus_one = bucket_values(
+                    widths_minus_one,
+                    num_total_buckets=self.
+                    _num_width_embeddings  # type: ignore
+                )
+
+            # Embed the span widths and concatenate to the rest of the representations.
+            span_width_embeddings = self._span_width_embedding(
+                widths_minus_one)
+            span_embeddings = torch.cat(
+                [span_embeddings, span_width_embeddings], -1)
+
+        if span_indices_mask is not None:
+            # Here we are masking the spans which were originally passed in as padding.
+            return span_embeddings * span_indices_mask.unsqueeze(-1)
+
+        return span_embeddings
+
+    def get_input_dim(self) -> int:
+        return self._input_dim
+
+    def _embed_spans(
+            self,
+            sequence_tensor: torch.FloatTensor,
+            span_indices: torch.LongTensor,
+            sequence_mask: torch.BoolTensor=None,
+            span_indices_mask: torch.BoolTensor=None, ) -> torch.Tensor:
+        """
+        Returns the span embeddings computed in many different ways.
         """
         raise NotImplementedError
 
@@ -413,25 +538,27 @@ def masked_softmax(
     return result
 
 
-class SelfAttentiveSpanExtractor(SpanExtractor):
+class SelfAttentiveSpanExtractor(SpanExtractorWithSpanWidthEmbedding):
     """
     Computes span representations by generating an unnormalized attention score for each
     word in the document. Spans representations are computed with respect to these
     scores by normalising the attention scores for words inside the span.
-
     Given these attention distributions over every span, this module weights the
     corresponding vector representations of the words in the span by this distribution,
     returning a weighted representation of each span.
-
     Registered as a `SpanExtractor` with name "self_attentive".
-
     # Parameters
-
     input_dim : `int`, required.
         The final dimension of the `sequence_tensor`.
-
+    num_width_embeddings : `int`, optional (default = `None`).
+        Specifies the number of buckets to use when representing
+        span width features.
+    span_width_embedding_dim : `int`, optional (default = `None`).
+        The embedding size for the span_width features.
+    bucket_widths : `bool`, optional (default = `False`).
+        Whether to bucket the span widths into log-space buckets. If `False`,
+        the raw span widths are used.
     # Returns
-
     attended_text_embeddings : `torch.FloatTensor`.
         A tensor of shape (batch_size, num_spans, input_dim), which each span representation
         is formed by locally normalising a global attention over the sequence. The only way
@@ -439,21 +566,30 @@ class SelfAttentiveSpanExtractor(SpanExtractor):
         over which they are normalized.
     """
 
-    def __init__(self, input_dim: int) -> None:
-        super().__init__()
-        self._input_dim = input_dim
+    def __init__(
+            self,
+            input_dim: int,
+            num_width_embeddings: int=None,
+            span_width_embedding_dim: int=None,
+            bucket_widths: bool=False, ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            num_width_embeddings=num_width_embeddings,
+            span_width_embedding_dim=span_width_embedding_dim,
+            bucket_widths=bucket_widths, )
         self._global_attention = TimeDistributed(torch.nn.Linear(input_dim, 1))
 
-    def get_input_dim(self) -> int:
-        return self._input_dim
-
     def get_output_dim(self) -> int:
+        if self._span_width_embedding is not None:
+            return self._input_dim + self._span_width_embedding.get_output_dim(
+            )
         return self._input_dim
 
-    def forward(
+    def _embed_spans(
             self,
             sequence_tensor: torch.FloatTensor,
             span_indices: torch.LongTensor,
+            sequence_mask: torch.BoolTensor=None,
             span_indices_mask: torch.BoolTensor=None, ) -> torch.FloatTensor:
         # shape (batch_size, sequence_length, 1)
         global_attention_logits = self._global_attention(sequence_tensor)
@@ -479,12 +615,6 @@ class SelfAttentiveSpanExtractor(SpanExtractor):
         # Shape: (batch_size, num_spans, embedding_dim)
         attended_text_embeddings = weighted_sum(span_embeddings,
                                                 span_attention_weights)
-
-        if span_indices_mask is not None:
-            # Above we were masking the widths of spans with respect to the max
-            # span width in the batch. Here we are masking the spans which were
-            # originally passed in as padding.
-            return attended_text_embeddings * span_indices_mask.unsqueeze(-1)
 
         return attended_text_embeddings
 
@@ -695,24 +825,226 @@ def bucket_values(distances: torch.Tensor,
     return combined_index.clamp(0, num_total_buckets - 1)
 
 
-class EndpointSpanExtractor(SpanExtractor):
+class BidirectionalEndpointSpanExtractor(SpanExtractorWithSpanWidthEmbedding):
     """
-    Represents spans as a combination of the embeddings of their endpoints. Additionally,
-    the width of the spans can be embedded and concatenated on to the final combination.
-
-    The following types of representation are supported, assuming that
-    `x = span_start_embeddings` and `y = span_end_embeddings`.
-
+    Represents spans from a bidirectional encoder as a concatenation of two different
+    representations of the span endpoints, one for the forward direction of the encoder
+    and one from the backward direction. This type of representation encodes some subtlety,
+    because when you consider the forward and backward directions separately, the end index
+    of the span for the backward direction's representation is actually the start index.
+    By default, this `SpanExtractor` represents spans as
+    `sequence_tensor[inclusive_span_end] - sequence_tensor[exclusive_span_start]`
+    meaning that the representation is the difference between the the last word in the span
+    and the word `before` the span started. Note that the start and end indices are with
+    respect to the direction that the RNN is going in, so for the backward direction, the
+    start/end indices are reversed.
+    Additionally, the width of the spans can be embedded and concatenated on to the
+    final combination.
+    The following other types of representation are supported for both the forward and backward
+    directions, assuming that `x = span_start_embeddings` and `y = span_end_embeddings`.
     `x`, `y`, `x*y`, `x+y`, `x-y`, `x/y`, where each of those binary operations
     is performed elementwise.  You can list as many combinations as you want, comma separated.
     For example, you might give `x,y,x*y` as the `combination` parameter to this class.
     The computed similarity function would then be `[x; y; x*y]`, which can then be optionally
     concatenated with an embedded representation of the width of the span.
-
-    Registered as a `SpanExtractor` with name "endpoint".
-
+    Registered as a `SpanExtractor` with name "bidirectional_endpoint".
     # Parameters
+    input_dim : `int`, required
+        The final dimension of the `sequence_tensor`.
+    forward_combination : `str`, optional (default = `"y-x"`).
+        The method used to combine the `forward_start_embeddings` and `forward_end_embeddings`
+        for the forward direction of the bidirectional representation.
+        See above for a full description.
+    backward_combination : `str`, optional (default = `"x-y"`).
+        The method used to combine the `backward_start_embeddings` and `backward_end_embeddings`
+        for the backward direction of the bidirectional representation.
+        See above for a full description.
+    num_width_embeddings : `int`, optional (default = `None`).
+        Specifies the number of buckets to use when representing
+        span width features.
+    span_width_embedding_dim : `int`, optional (default = `None`).
+        The embedding size for the span_width features.
+    bucket_widths : `bool`, optional (default = `False`).
+        Whether to bucket the span widths into log-space buckets. If `False`,
+        the raw span widths are used.
+    use_sentinels : `bool`, optional (default = `True`).
+        If `True`, sentinels are used to represent exclusive span indices for the elements
+        in the first and last positions in the sequence (as the exclusive indices for these
+        elements are outside of the the sequence boundary). This is not strictly necessary,
+        as you may know that your exclusive start and end indices are always within your sequence
+        representation, such as if you have appended/prepended <START> and <END> tokens to your
+        sequence.
+    """
 
+    def __init__(
+            self,
+            input_dim: int,
+            forward_combination: str="y-x",
+            backward_combination: str="x-y",
+            num_width_embeddings: int=None,
+            span_width_embedding_dim: int=None,
+            bucket_widths: bool=False,
+            use_sentinels: bool=True, ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            num_width_embeddings=num_width_embeddings,
+            span_width_embedding_dim=span_width_embedding_dim,
+            bucket_widths=bucket_widths, )
+        self._forward_combination = forward_combination
+        self._backward_combination = backward_combination
+
+        if self._input_dim % 2 != 0:
+            raise ConfigurationError(
+                "The input dimension is not divisible by 2, but the "
+                "BidirectionalEndpointSpanExtractor assumes the embedded representation "
+                "is bidirectional (and hence divisible by 2).")
+
+        self._use_sentinels = use_sentinels
+        if use_sentinels:
+            self._start_sentinel = nn.Parameter(
+                torch.randn([1, 1, int(input_dim / 2)]))
+            self._end_sentinel = nn.Parameter(
+                torch.randn([1, 1, int(input_dim / 2)]))
+
+    def get_output_dim(self) -> int:
+        unidirectional_dim = int(self._input_dim / 2)
+        forward_combined_dim = get_combined_dim(
+            self._forward_combination,
+            [unidirectional_dim, unidirectional_dim])
+        backward_combined_dim = get_combined_dim(
+            self._backward_combination,
+            [unidirectional_dim, unidirectional_dim])
+        if self._span_width_embedding is not None:
+            return (forward_combined_dim + backward_combined_dim +
+                    self._span_width_embedding.get_output_dim())
+        return forward_combined_dim + backward_combined_dim
+
+    def _embed_spans(
+            self,
+            sequence_tensor: torch.FloatTensor,
+            span_indices: torch.LongTensor,
+            sequence_mask: torch.BoolTensor=None,
+            span_indices_mask: torch.BoolTensor=None, ) -> torch.FloatTensor:
+
+        # Both of shape (batch_size, sequence_length, embedding_size / 2)
+        forward_sequence, backward_sequence = sequence_tensor.split(
+            int(self._input_dim / 2), dim=-1)
+        forward_sequence = forward_sequence.contiguous()
+        backward_sequence = backward_sequence.contiguous()
+
+        # shape (batch_size, num_spans)
+        span_starts, span_ends = [
+            index.squeeze(-1) for index in span_indices.split(
+                1, dim=-1)
+        ]
+
+        if span_indices_mask is not None:
+            span_starts = span_starts * span_indices_mask
+            span_ends = span_ends * span_indices_mask
+        # We want `exclusive` span starts, so we remove 1 from the forward span starts
+        # as the AllenNLP `SpanField` is inclusive.
+        # shape (batch_size, num_spans)
+        exclusive_span_starts = span_starts - 1
+        # shape (batch_size, num_spans, 1)
+        start_sentinel_mask = (exclusive_span_starts == -1).unsqueeze(-1)
+
+        # We want `exclusive` span ends for the backward direction
+        # (so that the `start` of the span in that direction is exlusive), so
+        # we add 1 to the span ends as the AllenNLP `SpanField` is inclusive.
+        exclusive_span_ends = span_ends + 1
+
+        if sequence_mask is not None:
+            # shape (batch_size)
+            sequence_lengths = get_lengths_from_binary_sequence_mask(
+                sequence_mask)
+        else:
+            # shape (batch_size), filled with the sequence length size of the sequence_tensor.
+            sequence_lengths = torch.ones_like(
+                sequence_tensor[:, 0, 0],
+                dtype=torch.long) * sequence_tensor.size(1)
+
+        # shape (batch_size, num_spans, 1)
+        end_sentinel_mask = (exclusive_span_ends >=
+                             sequence_lengths.unsqueeze(-1)).unsqueeze(-1)
+
+        # As we added 1 to the span_ends to make them exclusive, which might have caused indices
+        # equal to the sequence_length to become out of bounds, we multiply by the inverse of the
+        # end_sentinel mask to erase these indices (as we will replace them anyway in the block below).
+        # The same argument follows for the exclusive span start indices.
+        exclusive_span_ends = exclusive_span_ends * ~end_sentinel_mask.squeeze(
+            -1)
+        exclusive_span_starts = exclusive_span_starts * ~start_sentinel_mask.squeeze(
+            -1)
+
+        # We'll check the indices here at runtime, because it's difficult to debug
+        # if this goes wrong and it's tricky to get right.
+        if (exclusive_span_starts < 0).any() or (
+                exclusive_span_ends > sequence_lengths.unsqueeze(-1)).any():
+            raise ValueError(
+                f"Adjusted span indices must lie inside the length of the sequence tensor, "
+                f"but found: exclusive_span_starts: {exclusive_span_starts}, "
+                f"exclusive_span_ends: {exclusive_span_ends} for a sequence tensor with lengths "
+                f"{sequence_lengths}.")
+
+        # Forward Direction: start indices are exclusive. Shape (batch_size, num_spans, input_size / 2)
+        forward_start_embeddings = batched_index_select(forward_sequence,
+                                                        exclusive_span_starts)
+        # Forward Direction: end indices are inclusive, so we can just use span_ends.
+        # Shape (batch_size, num_spans, input_size / 2)
+        forward_end_embeddings = batched_index_select(forward_sequence,
+                                                      span_ends)
+
+        # Backward Direction: The backward start embeddings use the `forward` end
+        # indices, because we are going backwards.
+        # Shape (batch_size, num_spans, input_size / 2)
+        backward_start_embeddings = batched_index_select(backward_sequence,
+                                                         exclusive_span_ends)
+        # Backward Direction: The backward end embeddings use the `forward` start
+        # indices, because we are going backwards.
+        # Shape (batch_size, num_spans, input_size / 2)
+        backward_end_embeddings = batched_index_select(backward_sequence,
+                                                       span_starts)
+
+        if self._use_sentinels:
+            # If we're using sentinels, we need to replace all the elements which were
+            # outside the dimensions of the sequence_tensor with either the start sentinel,
+            # or the end sentinel.
+            forward_start_embeddings = (
+                forward_start_embeddings * ~start_sentinel_mask +
+                start_sentinel_mask * self._start_sentinel)
+            backward_start_embeddings = (
+                backward_start_embeddings * ~end_sentinel_mask +
+                end_sentinel_mask * self._end_sentinel)
+
+        # Now we combine the forward and backward spans in the manner specified by the
+        # respective combinations and concatenate these representations.
+        # Shape (batch_size, num_spans, forward_combination_dim)
+        forward_spans = combine_tensors(
+            self._forward_combination,
+            [forward_start_embeddings, forward_end_embeddings])
+        # Shape (batch_size, num_spans, backward_combination_dim)
+        backward_spans = combine_tensors(
+            self._backward_combination,
+            [backward_start_embeddings, backward_end_embeddings])
+        # Shape (batch_size, num_spans, forward_combination_dim + backward_combination_dim)
+        span_embeddings = torch.cat([forward_spans, backward_spans], -1)
+
+        return span_embeddings
+
+
+class EndpointSpanExtractor(SpanExtractorWithSpanWidthEmbedding):
+    """
+    Represents spans as a combination of the embeddings of their endpoints. Additionally,
+    the width of the spans can be embedded and concatenated on to the final combination.
+    The following types of representation are supported, assuming that
+    `x = span_start_embeddings` and `y = span_end_embeddings`.
+    `x`, `y`, `x*y`, `x+y`, `x-y`, `x/y`, where each of those binary operations
+    is performed elementwise.  You can list as many combinations as you want, comma separated.
+    For example, you might give `x,y,x*y` as the `combination` parameter to this class.
+    The computed similarity function would then be `[x; y; x*y]`, which can then be optionally
+    concatenated with an embedded representation of the width of the span.
+    Registered as a `SpanExtractor` with name "endpoint".
+    # Parameters
     input_dim : `int`, required.
         The final dimension of the `sequence_tensor`.
     combination : `str`, optional (default = `"x,y"`).
@@ -744,29 +1076,17 @@ class EndpointSpanExtractor(SpanExtractor):
             span_width_embedding_dim: int=None,
             bucket_widths: bool=False,
             use_exclusive_start_indices: bool=False, ) -> None:
-        super().__init__()
-        self._input_dim = input_dim
+        super().__init__(
+            input_dim=input_dim,
+            num_width_embeddings=num_width_embeddings,
+            span_width_embedding_dim=span_width_embedding_dim,
+            bucket_widths=bucket_widths, )
         self._combination = combination
-        self._num_width_embeddings = num_width_embeddings
-        self._bucket_widths = bucket_widths
 
         self._use_exclusive_start_indices = use_exclusive_start_indices
         if use_exclusive_start_indices:
             self._start_sentinel = nn.Parameter(
                 torch.randn([1, 1, int(input_dim)]))
-
-        self._span_width_embedding = None
-        if num_width_embeddings is not None and span_width_embedding_dim is not None:
-            self._span_width_embedding = nn.Embedding(
-                num_embeddings=num_width_embeddings,
-                embedding_dim=span_width_embedding_dim, )
-        elif num_width_embeddings is not None or span_width_embedding_dim is not None:
-            raise ConfigurationError(
-                "To use a span width embedding representation, you must"
-                "specify both num_width_buckets and span_width_embedding_dim.")
-
-    def get_input_dim(self) -> int:
-        return self._input_dim
 
     def get_output_dim(self) -> int:
         combined_dim = get_combined_dim(self._combination,
@@ -775,8 +1095,7 @@ class EndpointSpanExtractor(SpanExtractor):
             return combined_dim + self._span_width_embedding.get_output_dim()
         return combined_dim
 
-    @overrides
-    def forward(
+    def _embed_spans(
             self,
             sequence_tensor: torch.FloatTensor,
             span_indices: torch.LongTensor,
@@ -812,8 +1131,8 @@ class EndpointSpanExtractor(SpanExtractor):
             exclusive_span_starts = span_starts - 1
             # shape (batch_size, num_spans, 1)
             start_sentinel_mask = (exclusive_span_starts == -1).unsqueeze(-1)
-            exclusive_span_starts = (exclusive_span_starts *
-                                     ~start_sentinel_mask.squeeze(-1))
+            exclusive_span_starts = exclusive_span_starts * ~start_sentinel_mask.squeeze(
+                -1)
 
             # We'll check the indices here at runtime, because it's difficult to debug
             # if this goes wrong and it's tricky to get right.
@@ -834,22 +1153,170 @@ class EndpointSpanExtractor(SpanExtractor):
 
         combined_tensors = combine_tensors(self._combination,
                                            [start_embeddings, end_embeddings])
-        if self._span_width_embedding is not None:
-            # Embed the span widths and concatenate to the rest of the representations.
-            if self._bucket_widths:
-                span_widths = bucket_values(
-                    span_ends - span_starts,
-                    num_total_buckets=self.
-                    _num_width_embeddings  # type: ignore
-                )
-            else:
-                span_widths = span_ends - span_starts
-
-            span_width_embeddings = self._span_width_embedding(span_widths)
-            combined_tensors = torch.cat(
-                [combined_tensors, span_width_embeddings], -1)
-
-        if span_indices_mask is not None:
-            return combined_tensors * span_indices_mask.unsqueeze(-1)
 
         return combined_tensors
+
+
+def masked_max(
+        vector: torch.Tensor,
+        mask: torch.BoolTensor,
+        dim: int,
+        keepdim: bool=False, ) -> torch.Tensor:
+    """
+    To calculate max along certain dimensions on masked values
+
+    # Parameters
+
+    vector : `torch.Tensor`
+        The vector to calculate max, assume unmasked parts are already zeros
+    mask : `torch.BoolTensor`
+        The mask of the vector. It must be broadcastable with vector.
+    dim : `int`
+        The dimension to calculate max
+    keepdim : `bool`
+        Whether to keep dimension
+
+    # Returns
+
+    `torch.Tensor`
+        A `torch.Tensor` of including the maximum values.
+    """
+    replaced_vector = vector.masked_fill(~mask,
+                                         min_value_of_dtype(vector.dtype))
+    max_value, _ = replaced_vector.max(dim=dim, keepdim=keepdim)
+    return max_value
+
+
+def get_lengths_from_binary_sequence_mask(
+        mask: torch.BoolTensor) -> torch.LongTensor:
+    """
+    Compute sequence lengths for each batch element in a tensor using a
+    binary mask.
+
+    # Parameters
+
+    mask : `torch.BoolTensor`, required.
+        A 2D binary mask of shape (batch_size, sequence_length) to
+        calculate the per-batch sequence lengths from.
+
+    # Returns
+
+    `torch.LongTensor`
+        A torch.LongTensor of shape (batch_size,) representing the lengths
+        of the sequences in the batch.
+    """
+    return mask.sum(-1)
+
+
+class MaxPoolingSpanExtractor(SpanExtractorWithSpanWidthEmbedding):
+    """
+    Represents spans through the application of a dimension-wise max-pooling operation.
+    Given a span x_i, ..., x_j with i,j as span_start and span_end, each dimension d
+    of the resulting span s is computed via s_d = max(x_id, ..., x_jd).
+    Elements masked-out by sequence_mask are ignored when max-pooling is computed.
+    Span representations of masked out span_indices by span_mask are set to '0.'
+    Registered as a `SpanExtractor` with name "max_pooling".
+    # Parameters
+    input_dim : `int`, required.
+        The final dimension of the `sequence_tensor`.
+    num_width_embeddings : `int`, optional (default = `None`).
+        Specifies the number of buckets to use when representing
+        span width features.
+    span_width_embedding_dim : `int`, optional (default = `None`).
+        The embedding size for the span_width features.
+    bucket_widths : `bool`, optional (default = `False`).
+        Whether to bucket the span widths into log-space buckets. If `False`,
+        the raw span widths are used.
+    # Returns
+    max_pooling_text_embeddings : `torch.FloatTensor`.
+        A tensor of shape (batch_size, num_spans, input_dim), which each span representation
+        is the result of a max-pooling operation.
+    """
+
+    def __init__(
+            self,
+            input_dim: int,
+            num_width_embeddings: int=None,
+            span_width_embedding_dim: int=None,
+            bucket_widths: bool=False, ) -> None:
+        super().__init__(
+            input_dim=input_dim,
+            num_width_embeddings=num_width_embeddings,
+            span_width_embedding_dim=span_width_embedding_dim,
+            bucket_widths=bucket_widths, )
+
+    def get_output_dim(self) -> int:
+        if self._span_width_embedding is not None:
+            return self._input_dim + self._span_width_embedding.get_output_dim(
+            )
+        return self._input_dim
+
+    def _embed_spans(
+            self,
+            sequence_tensor: torch.FloatTensor,
+            span_indices: torch.LongTensor,
+            sequence_mask: torch.BoolTensor=None,
+            span_indices_mask: torch.BoolTensor=None, ) -> torch.FloatTensor:
+
+        if sequence_tensor.size(-1) != self._input_dim:
+            raise ValueError(
+                f"Dimension mismatch expected ({sequence_tensor.size(-1)}) "
+                f"received ({self._input_dim}).")
+
+        if sequence_tensor.shape[1] <= span_indices.max() or span_indices.min(
+        ) < 0:
+            raise IndexError(
+                f"Span index out of range, max index ({span_indices.max()}) "
+                f"or min index ({span_indices.min()}) "
+                f"not valid for sequence of length ({sequence_tensor.shape[1]})."
+            )
+
+        if (span_indices[:, :, 0] > span_indices[:, :, 1]).any():
+            raise IndexError("Span start above span end", )
+
+        # Calculate the maximum sequence length for each element in batch.
+        # If span_end indices are above these length, we adjust the indices in adapted_span_indices
+        if sequence_mask is not None:
+            # shape (batch_size)
+            sequence_lengths = get_lengths_from_binary_sequence_mask(
+                sequence_mask)
+        else:
+            # shape (batch_size), filled with the sequence length size of the sequence_tensor.
+            sequence_lengths = torch.ones_like(
+                sequence_tensor[:, 0, 0],
+                dtype=torch.long) * sequence_tensor.size(1)
+
+        adapted_span_indices = torch.tensor(
+            span_indices, device=span_indices.device)
+
+        for b in range(sequence_lengths.shape[0]):
+            adapted_span_indices[b, :, 1][adapted_span_indices[b, :, 1] >=
+                                          sequence_lengths[b]] = (
+                                              sequence_lengths[b] - 1)
+
+        # Raise Error if span indices were completely masked by sequence mask.
+        # We only adjust span_end to the last valid index, so if span_end is below span_start,
+        # both were above the max index:
+
+        if (adapted_span_indices[:, :, 0] > adapted_span_indices[:, :, 1]
+            ).any():
+            raise IndexError(
+                "Span indices were masked out entirely by sequence mask", )
+
+        # span_vals <- (batch x num_spans x max_span_length x dim)
+        span_vals, span_mask = batched_span_select(sequence_tensor,
+                                                   adapted_span_indices)
+
+        # The application of masked_max requires a mask of the same shape as span_vals
+        # We repeat the mask along the last dimension (embedding dimension)
+        repeat_dim = len(span_vals.shape) - 1
+        repeat_idx = [1] * (repeat_dim) + [span_vals.shape[-1]]
+
+        # ext_span_mask <- (batch x num_spans x max_span_length x dim)
+        # ext_span_mask True for values in span, False for masked out values
+        ext_span_mask = span_mask.unsqueeze(repeat_dim).repeat(repeat_idx)
+
+        # max_out <- (batch x num_spans x dim)
+        max_out = masked_max(span_vals, ext_span_mask, dim=-2)
+
+        return max_out

@@ -121,15 +121,15 @@ class DiceLoss(nn.Module):
 
                 if keep_num > 0:
                     neg_scores = torch.masked_select(
-                        flat_input,
-                        neg_example.view(-1, 1).bool()).view(-1, logits_size)
+                        flat_input, neg_example.reshape(-1, 1).bool()).reshape(
+                            -1, logits_size)
                     neg_scores_idx = neg_scores[:, label_idx]
                     neg_scores_sort, _ = torch.sort(neg_scores_idx, )
                     threshold = neg_scores_sort[-keep_num + 1]
                     cond = (torch.argmax(
                         flat_input,
                         dim=1) == label_idx & flat_input[:, label_idx] >=
-                            threshold) | pos_example.view(-1)
+                            threshold) | pos_example.reshape(-1)
                     ohem_mask_idx = torch.where(cond, 1, 0)
 
                     flat_input_idx = flat_input[:, label_idx]
@@ -142,7 +142,8 @@ class DiceLoss(nn.Module):
                     flat_target_idx = flat_target[:, label_idx]
 
                 loss_idx = self._compute_dice_loss(
-                    flat_input_idx.view(-1, 1), flat_target_idx.view(-1, 1))
+                    flat_input_idx.reshape(-1, 1),
+                    flat_target_idx.reshape(-1, 1))
                 if loss is None:
                     loss = loss_idx
                 else:
@@ -156,7 +157,8 @@ class DiceLoss(nn.Module):
                 flat_target_idx = flat_target[:, label_idx]
 
                 loss_idx = self._compute_dice_loss(
-                    flat_input_idx.view(-1, 1), flat_target_idx.view(-1, 1))
+                    flat_input_idx.reshape(-1, 1),
+                    flat_target_idx.reshape(-1, 1))
                 if loss is None:
                     loss = loss_idx
                 else:
@@ -164,8 +166,8 @@ class DiceLoss(nn.Module):
             return loss
 
     def _binary_class(self, input, target, mask=None):
-        flat_input = input.view(-1)
-        flat_target = target.view(-1).float()
+        flat_input = input.reshape(-1)
+        flat_target = target.reshape(-1).float()
         flat_input = torch.sigmoid(
             flat_input) if self.with_logits else flat_input
 
@@ -188,7 +190,7 @@ class DiceLoss(nn.Module):
             neg_scores = torch.masked_select(flat_input, neg_example.bool())
             neg_scores_sort, _ = torch.sort(neg_scores, )
             threshold = neg_scores_sort[-keep_num + 1]
-            cond = (flat_input > threshold) | pos_example.view(-1)
+            cond = (flat_input > threshold) | pos_example.reshape(-1)
             ohem_mask = torch.where(cond, 1, 0)
             flat_input = flat_input * ohem_mask
             flat_target = flat_target * ohem_mask

@@ -17,7 +17,7 @@ from .postprocess import (
     SoftmaxCrfPostProcess,
     SpanPostProcess, )
 from .span_extractor import (
-    EndpointSpanExtractor,
-    SelfAttentiveSpanExtractor,
-    SpanExtractor, )
+    EndpointSpanExtractor, SelfAttentiveSpanExtractor, MaxPoolingSpanExtractor,
+    BidirectionalEndpointSpanExtractor, SpanExtractorWithSpanWidthEmbedding,
+    SpanExtractor)
 from .tag_decoder import FeedForwardNetwork, PoolerEndLogits, PoolerStartLogits
