@@ -63,25 +63,26 @@ def get_auto_model(parent_cls, base_cls, method="globalpointer"):
                 self.u3 = nn.Linear(4 * hidden_size, 1)
                 self.type_linear = nn.Linear(2 * hidden_size, self.num_labels)
 
-                # Regularity-agnostic module
-                self.regularity_agnostic_lstm = nn.LSTM(
-                    input_size=config.hidden_size,
-                    hidden_size=hidden_size,
-                    bidirectional=True,
-                    num_layers=1,
-                    batch_first=True,
-                    dropout=0.4, )
-                self.mlp1 = nn.Sequential(
-                    nn.Linear(2 * hidden_size, 2 * hidden_size),
-                    nn.GELU(),
-                    nn.Dropout(0.2),
-                    nn.Linear(2 * hidden_size, 2 * hidden_size), )
-                self.mlp2 = nn.Sequential(
-                    nn.Linear(2 * hidden_size, 2 * hidden_size),
-                    nn.GELU(),
-                    nn.Dropout(0.2),
-                    nn.Linear(2 * hidden_size, 2 * hidden_size), )
-                self.agnostic_biaffine = Biaffine(2 * hidden_size, 1)
+                if self.agnostic_loss_eof > 0:
+                    # Regularity-agnostic module
+                    self.regularity_agnostic_lstm = nn.LSTM(
+                        input_size=config.hidden_size,
+                        hidden_size=hidden_size,
+                        bidirectional=True,
+                        num_layers=1,
+                        batch_first=True,
+                        dropout=0.4, )
+                    self.mlp1 = nn.Sequential(
+                        nn.Linear(2 * hidden_size, 2 * hidden_size),
+                        nn.GELU(),
+                        nn.Dropout(0.2),
+                        nn.Linear(2 * hidden_size, 2 * hidden_size), )
+                    self.mlp2 = nn.Sequential(
+                        nn.Linear(2 * hidden_size, 2 * hidden_size),
+                        nn.GELU(),
+                        nn.Dropout(0.2),
+                        nn.Linear(2 * hidden_size, 2 * hidden_size), )
+                    self.agnostic_biaffine = Biaffine(2 * hidden_size, 1)
 
                 self.multilabel_loss = config.multilabel_loss
                 # donot init
@@ -157,13 +158,17 @@ def get_auto_model(parent_cls, base_cls, method="globalpointer"):
                 # aware_output (equation 11)
                 aware_output = self.type_linear(h_sij)
 
-                # (2) Regularity-agnostic module
-                h_agnostic = self.regularity_agnostic_lstm(sequence_output)[0]
-                h_agnostic_head = self.mlp1(h_agnostic)
-                h_agnostic_tail = self.mlp2(h_agnostic)
-                # h_agnostic_head (equation 15)
-                agnostic_output = self.agnostic_biaffine(h_agnostic_head,
-                                                         h_agnostic_tail)
+                if self.agnostic_loss_eof > 0:
+                    # (2) Regularity-agnostic module
+                    h_agnostic = self.regularity_agnostic_lstm(
+                        sequence_output)[0]
+                    h_agnostic_head = self.mlp1(h_agnostic)
+                    h_agnostic_tail = self.mlp2(h_agnostic)
+                    # h_agnostic_head (equation 15)
+                    agnostic_output = self.agnostic_biaffine(h_agnostic_head,
+                                                             h_agnostic_tail)
+                else:
+                    agnostic_output = None
 
                 output = (aware_output, agnostic_output)
                 loss = None
@@ -172,7 +177,7 @@ def get_auto_model(parent_cls, base_cls, method="globalpointer"):
                     ##############################################################3
                     # equation (16) l2 norm loss
                     # horth_output shape [bs, seqlen, num_labels]
-                    if self.orth_loss_eof > 0:
+                    if self.orth_loss_eof > 0 and self.agnostic_loss_eof > 0:
                         horth_output = torch.matmul(
                             h_aware.transpose(-2, -1), h_agnostic).squeeze(-1)
                         loss += (self.orth_loss_eof *

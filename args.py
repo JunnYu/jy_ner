@@ -273,7 +273,7 @@ def add_ricon_model_specific_args(parent_parser):
     parser.add_argument(
         "--orth_loss_eof",
         type=float,
-        default=0,
+        default=0.0,
         help="orth_loss_eof.", )
     parser.add_argument(
         "--aware_loss_eof",
@@ -283,7 +283,7 @@ def add_ricon_model_specific_args(parent_parser):
     parser.add_argument(
         "--agnostic_loss_eof",
         type=float,
-        default=1.0,
+        default=0.0,
         help="agnostic_loss_eof.", )
     parser.add_argument(
         "--combination",
