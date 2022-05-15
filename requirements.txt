@@ -1,0 +1,10 @@
+transformers>=4.16.2
+fastcore
+datasets
+seqeval
+rjieba
+accelerate>=0.8.0
+defaultlist
+roformer
+chinesebert
+gau_alpha
