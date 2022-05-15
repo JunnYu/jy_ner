@@ -47,7 +47,7 @@ def get_auto_model(parent_cls, base_cls, method="globalpointer"):
                     batch_first=True,
                     dropout=0.4, )
 
-                self.reg = nn.Linear(2 * hidden_size, 2 * hidden_size)
+                # self.reg = nn.Linear(2 * hidden_size, 2 * hidden_size)
                 self.self_attentive_span_extractor = SelfAttentiveSpanExtractor(
                     2 * hidden_size)
                 self.endpoint_span_extractor = EndpointSpanExtractor(
