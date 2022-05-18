@@ -372,3 +372,49 @@ def multilabel_categorical_crossentropy(y_pred, y_true):
     neg_loss = torch.logsumexp(y_pred_neg, axis=-1)
     pos_loss = torch.logsumexp(y_pred_pos, axis=-1)
     return (neg_loss + pos_loss).sum(1).mean()
+
+
+def adaptive_thresholding_loss(
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        mask: torch.Tensor,
+        zero_thres: bool=False,
+        eps: float=1e-7,
+        inf: float=1e4, ) -> torch.Tensor:
+    """Adaptive thresholding Loss"""
+    # https://github.com/seukgcode/FastRE/blob/18803f2c307c488e3fb9c795ae9854d4e5c270d4/module/utils.py#L69-L82
+    # at_loss(logits, labels, mask)
+    # logits shape [bs, seqlen, num_relations + 1]
+    # labels shape [bs, seqlen, num_relations]
+    # mask shape [bs, seqlen, 1]
+    # if pad_first: num_relations index is range(1, num_relations+1), thres index is 0
+    # else num_relations index is range(0, num_relations), thres index is num_relations
+    ###################################################
+    # num_relations = 3
+    # logits = torch.randn(1, 4, 1 + num_relations)
+    # new_logits = torch.cat([logits[...,1:],logits[...,:1]], -1)
+    # labels = torch.tensor([[[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 1]]])
+    # mask = torch.ones(1, 4, 1)
+    # loss1 = adaptive_thresholding_loss(logits, labels, mask, zero_thres=True)
+    # loss2 = adaptive_thresholding_loss(new_logits, labels, mask, zero_thres=False)
+    # loss1 == loss2
+    zeros = torch.zeros_like(labels[..., :1])
+    if zero_thres:
+        labels = torch.cat([zeros, labels], dim=-1)
+        thres_label = torch.zeros_like(labels)
+        thres_label[..., 0] = 1.0
+    else:
+        labels = torch.cat([labels, zeros], dim=-1)
+        thres_label = torch.zeros_like(labels)
+        thres_label[..., -1] = 1.0
+
+    pos_logits = logits - (1 - labels - thres_label) * inf
+    pos_loss = -torch.sum((pos_logits.softmax(-1) + eps).log() * labels,
+                          dim=-1)
+
+    neg_logits = logits - labels * inf
+    neg_loss = -torch.sum((neg_logits.softmax(-1) + eps).log() * thres_label,
+                          dim=-1)
+
+    loss = (pos_loss + neg_loss).sum() / mask.sum()
+    return loss
