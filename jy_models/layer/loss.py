@@ -377,7 +377,7 @@ def multilabel_categorical_crossentropy(y_pred, y_true):
 def adaptive_thresholding_loss(
         logits: torch.Tensor,
         labels: torch.Tensor,
-        mask: torch.Tensor,
+        mask: torch.Tensor=None,
         zero_thres: bool=False,
         eps: float=1e-7,
         inf: float=1e4, ) -> torch.Tensor:
@@ -415,6 +415,9 @@ def adaptive_thresholding_loss(
     neg_logits = logits - labels * inf
     neg_loss = -torch.sum((neg_logits.softmax(-1) + eps).log() * thres_label,
                           dim=-1)
-
-    loss = (pos_loss + neg_loss).sum() / mask.sum()
+    loss = pos_loss + neg_loss
+    if mask is None:
+        loss = loss.mean()
+    else:
+        loss = loss.sum() / mask.sum()
     return loss
