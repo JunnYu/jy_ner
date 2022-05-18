@@ -362,7 +362,7 @@ def globalpointer_loss(y_pred, y_true):
 
 def multilabel_categorical_crossentropy(y_pred, y_true):
     y_pred = y_pred.reshape(-1, y_pred.size(-1))
-    y_true = y_true.reshape(-1, y_true.shape(-1)).to(y_pred.dtype)
+    y_true = y_true.reshape(-1, y_true.size(-1)).to(y_pred.dtype)
     y_pred = (1 - 2 * y_true) * y_pred
     y_pred_neg = y_pred - y_true * INF
     y_pred_pos = y_pred - (1 - y_true) * INF
@@ -398,6 +398,8 @@ def adaptive_thresholding_loss(
     # loss1 = adaptive_thresholding_loss(logits, labels, mask, zero_thres=True)
     # loss2 = adaptive_thresholding_loss(new_logits, labels, mask, zero_thres=False)
     # loss1 == loss2
+    # logits = logits.reshape(-1, logits.size(-1))
+    # labels = labels.reshape(-1, labels.size(-1)).to(logits.dtype)
     zeros = torch.zeros_like(labels[..., :1])
     if zero_thres:
         labels = torch.cat([zeros, labels], dim=-1)
