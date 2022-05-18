@@ -4,7 +4,6 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from overrides import overrides
 
 # !!!!!!!!!!!!!!!!!ALL copied from allennlp!!!!!!!!!!!!!!!!!
 # from allennlp.modules.span_extractors import SelfAttentiveSpanExtractor
@@ -27,7 +26,6 @@ class SpanExtractor(nn.Module):
     spans.
     """
 
-    @overrides
     def forward(
             self,
             sequence_tensor: torch.FloatTensor,
@@ -636,7 +634,6 @@ class TimeDistributed(nn.Module):
         super().__init__()
         self._module = module
 
-    @overrides
     def forward(self, *inputs, pass_through: List[str]=None, **kwargs):
 
         pass_through = pass_through or []
