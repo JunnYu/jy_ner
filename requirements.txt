@@ -3,7 +3,7 @@ fastcore
 datasets
 seqeval
 rjieba
-accelerate>=0.8.0
+accelerate==0.8.0
 defaultlist
 roformer
 chinesebert
